@@ -1,0 +1,6 @@
+global:
+    environment: devtest
+
+stacksNode:
+    image: blockstack/stacks-blockchain
+    version: latest

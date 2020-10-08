@@ -1,4 +1,4 @@
-use super::{BurnchainController, BurnchainTip, Config, EventDispatcher, Keychain};
+use super::{BurnchainController, BurnchainTip, Config, ConfigFile, EventDispatcher, Keychain};
 use crate::config::HELIUM_BLOCK_LIMIT;
 use crate::run_loop::RegisteredKey;
 
@@ -7,6 +7,7 @@ use std::convert::{TryFrom, TryInto};
 use std::default::Default;
 use std::net::SocketAddr;
 use std::{thread, thread::JoinHandle};
+use std::fs::File;
 
 use stacks::burnchains::{Burnchain, BurnchainHeaderHash, PublicKey, Txid};
 use stacks::chainstate::burn::db::sortdb::{SortitionDB, SortitionId};
@@ -384,7 +385,7 @@ fn spawn_miner_relayer(
         .map_err(NetError::DBError)?;
 
     let mut last_mined_block: Option<AssembledAnchorBlock> = None;
-    let burn_fee_cap = config.burnchain.burn_fee_cap;
+    //let burn_fee_cap = config.burnchain.burn_fee_cap;
     let mine_microblocks = config.node.mine_microblocks;
 
     let mut bitcoin_controller = BitcoinRegtestController::new_dummy(config.clone());
@@ -556,6 +557,11 @@ fn spawn_miner_relayer(
                 }
                 RelayerDirective::RunTenure(registered_key, last_burn_block) => {
                     debug!("Relayer: Run tenure");
+
+                    let config_file = ConfigFile::from_path("/conf/config.toml");
+                    let conf = Config::from_config_file(config_file);
+                    let burn_fee_cap = conf.burnchain.burn_fee_cap;
+
                     last_mined_block = InitializedNeonNode::relayer_run_tenure(
                         &config,
                         registered_key,

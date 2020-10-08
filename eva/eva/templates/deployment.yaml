@@ -1,0 +1,67 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: "eva-miner"
+  labels:
+    proposition: eva
+    tier: miner
+    app: "eva-miner"
+spec:
+  ports:
+  - port: 20443
+    name: rpc
+  - port: 20444
+    name: p2p
+  selector:
+    app: "eva-miner"
+  type: LoadBalancer
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: "eva-miner"
+  labels:
+    proposition: eva
+    tier: miner
+    app: "eva-miner"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: "eva-miner"
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        proposition: eva
+        tier: miner
+        app: "eva-miner"
+    spec:
+      containers:
+      - image: "{{ .Values.stacksNode.image }}:{{ .Values.stacksNode.version }}"
+        imagePullPolicy: Always
+        name: "eva-miner"
+        args: ["stacks-node", "start", "--config=/config/conf.toml"]
+        ports:
+        - containerPort: 20443
+          name: stacks-rpc-bind
+        - containerPort: 20444
+          name: stacks-p2p-bind
+        volumeMounts:
+        - name: "eva-config"
+          mountPath: /config
+      volumes:
+      - name: eva-config
+        configMap:
+          name: stacks-config
+      tolerations:
+      - key: "node.kubernetes.io/unreachable"
+        operator: "Exists"
+        effect: "NoExecute"
+        tolerationSeconds: 15
+      - key: "node.kubernetes.io/not-ready"
+        operator: "Exists"
+        effect: "NoExecute"
+        tolerationSeconds: 15
+---

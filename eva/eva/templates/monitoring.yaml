@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: eva-metrics
+  labels:
+    proposition: eva
+    tier: monitoring
+    app: prometheus
+    environment: "{{.Values.global.environment }}"
+spec:
+  ports:
+  - name: metrics
+    port: 12800
+    protocol: TCP
+  selector:
+    proposition: eva
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+    name: eva-{{.Values.global.environment }}-servicemonitor
+    namespace: monitoring
+    labels:
+        proposition: eva
+        app: prometheus
+        tier: monitoring
+        environment: "{{.Values.global.environment }}"
+        release: blackbird
+spec:
+    endpoints:
+    - port: metrics
+      interval: 5s
+    namespaceSelector:
+        matchNames:
+        - "{{ .Release.Namespace }}"
+    selector:
+        matchLabels:
+            proposition: eva
