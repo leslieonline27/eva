@@ -16,7 +16,7 @@ mode = "krypton"
 peer_host = "bitcoind.blockstack.org"
 rpc_port = 18443
 peer_port = 18444
-burn_fee_cap = 20000
+burn_fee_cap = 12500
 
 [[mstx_balance]]
 address = "STB44HYPYAT2BB2QE513NSP81HTMYWBJP02HPGK6"

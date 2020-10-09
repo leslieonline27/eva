@@ -3,4 +3,4 @@ kind: ConfigMap
 metadata:
   name: stacks-config
 data:
-{{ (.Files.Glob "conf.toml").AsConfig | indent 4  }}
+{{ (.Files.Glob "config.toml").AsConfig | indent 4  }}

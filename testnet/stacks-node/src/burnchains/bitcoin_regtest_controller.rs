@@ -504,8 +504,8 @@ impl BitcoinRegtestController {
         increment_btc_ops_sent_counter();
 
         info!(
-            "Miner node: submitting leader_block_commit op - {}",
-            public_key.to_hex()
+            "Miner node: submitting leader_block_commit op - {}, with burn fee {}",
+            public_key.to_hex(), payload.burn_fee
         );
 
         Some(tx)

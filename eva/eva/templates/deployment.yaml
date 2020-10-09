@@ -42,7 +42,7 @@ spec:
       - image: "{{ .Values.stacksNode.image }}:{{ .Values.stacksNode.version }}"
         imagePullPolicy: Always
         name: "eva-miner"
-        args: ["stacks-node", "start", "--config=/config/conf.toml"]
+        args: ["stacks-node", "start", "--config=/conf/config.toml"]
         ports:
         - containerPort: 20443
           name: stacks-rpc-bind
@@ -50,7 +50,7 @@ spec:
           name: stacks-p2p-bind
         volumeMounts:
         - name: "eva-config"
-          mountPath: /config
+          mountPath: /conf
       volumes:
       - name: eva-config
         configMap:

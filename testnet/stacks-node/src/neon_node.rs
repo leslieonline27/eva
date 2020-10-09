@@ -7,7 +7,6 @@ use std::convert::{TryFrom, TryInto};
 use std::default::Default;
 use std::net::SocketAddr;
 use std::{thread, thread::JoinHandle};
-use std::fs::File;
 
 use stacks::burnchains::{Burnchain, BurnchainHeaderHash, PublicKey, Txid};
 use stacks::chainstate::burn::db::sortdb::{SortitionDB, SortitionId};
