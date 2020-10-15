@@ -16,6 +16,22 @@ spec:
     app: "eva-miner"
   type: LoadBalancer
 ---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: "eva-config-pv-claim"
+  labels:
+    proposition: eva
+    tier: miner
+    app: "eva-miner"
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: azurefile
+  resources:
+    requests:
+      storage: 1Gi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -39,6 +55,13 @@ spec:
         app: "eva-miner"
     spec:
       containers:
+      - image: ubuntu
+        imagePullPolicy: Always
+        name: "eva-auto"
+        args: ["sleep", "365d"]
+        volumeMounts:
+        - name: "eva-config-pv-claim"
+          mountPath: /conf
       - image: "{{ .Values.stacksNode.image }}:{{ .Values.stacksNode.version }}"
         imagePullPolicy: Always
         name: "eva-miner"
@@ -49,12 +72,12 @@ spec:
         - containerPort: 20444
           name: stacks-p2p-bind
         volumeMounts:
-        - name: "eva-config"
+        - name: "eva-config-pv-claim"
           mountPath: /conf
       volumes:
-      - name: eva-config
-        configMap:
-          name: stacks-config
+      - name: eva-config-pv-claim
+        persistentVolumeClaim:
+          claimName: "eva-config-pv-claim"
       tolerations:
       - key: "node.kubernetes.io/unreachable"
         operator: "Exists"

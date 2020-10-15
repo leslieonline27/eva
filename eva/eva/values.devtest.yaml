@@ -2,5 +2,5 @@ global:
     environment: devtest
 
 stacksNode:
-    image: blockstack/stacks-blockchain
-    version: latest
+    image: ahgoo.azurecr.io/stacks-node
+    version: v23.0.0.6-krypton
