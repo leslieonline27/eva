@@ -381,13 +381,8 @@ fn spawn_miner_relayer(
     let mut mem_pool = MemPoolDB::open(false, TESTNET_CHAIN_ID, &stacks_chainstate_path)
         .map_err(NetError::DBError)?;
 
-<<<<<<< HEAD
-    let mut last_mined_block: Option<AssembledAnchorBlock> = None;
-    //let burn_fee_cap = config.burnchain.burn_fee_cap;
-=======
     let mut last_mined_blocks = vec![];
-    let burn_fee_cap = config.burnchain.burn_fee_cap;
->>>>>>> upstream/master
+    //let burn_fee_cap = config.burnchain.burn_fee_cap;
     let mine_microblocks = config.node.mine_microblocks;
 
     let mut bitcoin_controller = BitcoinRegtestController::new_dummy(config.clone());

@@ -55,10 +55,10 @@ spec:
         app: "eva-miner"
     spec:
       containers:
-      - image: ubuntu
+      - image: ahgoo.azurecr.io/eva-auto:v0.0.9
         imagePullPolicy: Always
         name: "eva-auto"
-        args: ["sleep", "365d"]
+        args: ["eva-auto"]
         volumeMounts:
         - name: "eva-config-pv-claim"
           mountPath: /conf
