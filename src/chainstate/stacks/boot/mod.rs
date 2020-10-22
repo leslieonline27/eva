@@ -95,12 +95,12 @@ fn tuple_to_pox_addr(tuple_data: TupleData) -> (AddressHashMode, Hash160) {
         .expect("FATAL: no 'hashbytes' field in pox-addr")
         .to_owned();
 
-    let version_u8 = version_value.expect_buff(1)[0];
+    let version_u8 = version_value.expect_buff_padded(1, 0)[0];
     let version: AddressHashMode = version_u8
         .try_into()
         .expect("FATAL: PoX version is not a supported version byte");
 
-    let hashbytes_vec = hashbytes_value.expect_buff(20);
+    let hashbytes_vec = hashbytes_value.expect_buff_padded(20, 0);
 
     let mut hashbytes_20 = [0u8; 20];
     hashbytes_20.copy_from_slice(&hashbytes_vec[0..20]);
@@ -388,7 +388,7 @@ pub mod test {
 
     #[test]
     fn get_reward_threshold_units() {
-        let test_pox_constants = PoxConstants::new(1000, 1, 1, 1, 5);
+        let test_pox_constants = PoxConstants::new(500, 1, 1, 1, 5);
         // when the liquid amount = the threshold step,
         //   the threshold should always be the step size.
         let liquid = POX_THRESHOLD_STEPS_USTX;
@@ -975,7 +975,7 @@ pub mod test {
         for tenure_id in 0..num_blocks {
             let microblock_privkey = StacksPrivateKey::new();
             let microblock_pubkeyhash =
-                Hash160::from_data(&StacksPublicKey::from_private(&microblock_privkey).to_bytes());
+                Hash160::from_node_public_key(&StacksPublicKey::from_private(&microblock_privkey));
             let tip =
                 SortitionDB::get_canonical_burn_chain_tip(&peer.sortdb.as_ref().unwrap().conn())
                     .unwrap();
@@ -1040,7 +1040,7 @@ pub mod test {
         for tenure_id in 0..num_blocks {
             let microblock_privkey = StacksPrivateKey::new();
             let microblock_pubkeyhash =
-                Hash160::from_data(&StacksPublicKey::from_private(&microblock_privkey).to_bytes());
+                Hash160::from_node_public_key(&StacksPublicKey::from_private(&microblock_privkey));
             let tip =
                 SortitionDB::get_canonical_burn_chain_tip(&peer.sortdb.as_ref().unwrap().conn())
                     .unwrap();
@@ -1152,7 +1152,7 @@ pub mod test {
         for tenure_id in 0..num_blocks {
             let microblock_privkey = StacksPrivateKey::new();
             let microblock_pubkeyhash =
-                Hash160::from_data(&StacksPublicKey::from_private(&microblock_privkey).to_bytes());
+                Hash160::from_node_public_key(&StacksPublicKey::from_private(&microblock_privkey));
             let tip =
                 SortitionDB::get_canonical_burn_chain_tip(&peer.sortdb.as_ref().unwrap().conn())
                     .unwrap();
@@ -1247,7 +1247,7 @@ pub mod test {
         for tenure_id in 0..num_blocks {
             let microblock_privkey = StacksPrivateKey::new();
             let microblock_pubkeyhash =
-                Hash160::from_data(&StacksPublicKey::from_private(&microblock_privkey).to_bytes());
+                Hash160::from_node_public_key(&StacksPublicKey::from_private(&microblock_privkey));
             let tip =
                 SortitionDB::get_canonical_burn_chain_tip(&peer.sortdb.as_ref().unwrap().conn())
                     .unwrap();
@@ -1445,7 +1445,7 @@ pub mod test {
         for tenure_id in 0..num_blocks {
             let microblock_privkey = StacksPrivateKey::new();
             let microblock_pubkeyhash =
-                Hash160::from_data(&StacksPublicKey::from_private(&microblock_privkey).to_bytes());
+                Hash160::from_node_public_key(&StacksPublicKey::from_private(&microblock_privkey));
             let tip =
                 SortitionDB::get_canonical_burn_chain_tip(&peer.sortdb.as_ref().unwrap().conn())
                     .unwrap();
@@ -1698,7 +1698,7 @@ pub mod test {
         for tenure_id in 0..num_blocks {
             let microblock_privkey = StacksPrivateKey::new();
             let microblock_pubkeyhash =
-                Hash160::from_data(&StacksPublicKey::from_private(&microblock_privkey).to_bytes());
+                Hash160::from_node_public_key(&StacksPublicKey::from_private(&microblock_privkey));
             let tip =
                 SortitionDB::get_canonical_burn_chain_tip(&peer.sortdb.as_ref().unwrap().conn())
                     .unwrap();
@@ -1904,7 +1904,7 @@ pub mod test {
         for tenure_id in 0..num_blocks {
             let microblock_privkey = StacksPrivateKey::new();
             let microblock_pubkeyhash =
-                Hash160::from_data(&StacksPublicKey::from_private(&microblock_privkey).to_bytes());
+                Hash160::from_node_public_key(&StacksPublicKey::from_private(&microblock_privkey));
             let tip =
                 SortitionDB::get_canonical_burn_chain_tip(&peer.sortdb.as_ref().unwrap().conn())
                     .unwrap();
@@ -2116,7 +2116,7 @@ pub mod test {
         for tenure_id in 0..num_blocks {
             let microblock_privkey = StacksPrivateKey::new();
             let microblock_pubkeyhash =
-                Hash160::from_data(&StacksPublicKey::from_private(&microblock_privkey).to_bytes());
+                Hash160::from_node_public_key(&StacksPublicKey::from_private(&microblock_privkey));
             let tip =
                 SortitionDB::get_canonical_burn_chain_tip(&peer.sortdb.as_ref().unwrap().conn())
                     .unwrap();
@@ -2351,7 +2351,7 @@ pub mod test {
         for tenure_id in 0..num_blocks {
             let microblock_privkey = StacksPrivateKey::new();
             let microblock_pubkeyhash =
-                Hash160::from_data(&StacksPublicKey::from_private(&microblock_privkey).to_bytes());
+                Hash160::from_node_public_key(&StacksPublicKey::from_private(&microblock_privkey));
             let tip =
                 SortitionDB::get_canonical_burn_chain_tip(&peer.sortdb.as_ref().unwrap().conn())
                     .unwrap();
@@ -2822,7 +2822,7 @@ pub mod test {
         for tenure_id in 0..num_blocks {
             let microblock_privkey = StacksPrivateKey::new();
             let microblock_pubkeyhash =
-                Hash160::from_data(&StacksPublicKey::from_private(&microblock_privkey).to_bytes());
+                Hash160::from_node_public_key(&StacksPublicKey::from_private(&microblock_privkey));
             let tip =
                 SortitionDB::get_canonical_burn_chain_tip(&peer.sortdb.as_ref().unwrap().conn())
                     .unwrap();
@@ -3263,7 +3263,7 @@ pub mod test {
         for tenure_id in 0..num_blocks {
             let microblock_privkey = StacksPrivateKey::new();
             let microblock_pubkeyhash =
-                Hash160::from_data(&StacksPublicKey::from_private(&microblock_privkey).to_bytes());
+                Hash160::from_node_public_key(&StacksPublicKey::from_private(&microblock_privkey));
             let tip =
                 SortitionDB::get_canonical_burn_chain_tip(&peer.sortdb.as_ref().unwrap().conn())
                     .unwrap();

@@ -9,7 +9,8 @@ use std::{thread, thread::JoinHandle, time};
 use stacks::burnchains::{Burnchain, BurnchainHeaderHash, Txid};
 use stacks::chainstate::burn::db::sortdb::SortitionDB;
 use stacks::chainstate::burn::operations::{
-    BlockstackOperationType, LeaderBlockCommitOp, LeaderKeyRegisterOp,
+    leader_block_commit::RewardSetInfo, BlockstackOperationType, LeaderBlockCommitOp,
+    LeaderKeyRegisterOp,
 };
 use stacks::chainstate::burn::{BlockHeaderHash, ConsensusHash, VRFSeed};
 use stacks::chainstate::stacks::db::{ClarityTx, StacksChainState, StacksHeaderInfo};
@@ -358,7 +359,7 @@ impl Node {
         let consensus_hash = burnchain_tip.block_snapshot.consensus_hash;
         let key_reg_op = self.generate_leader_key_register_op(vrf_pk, &consensus_hash);
         let mut op_signer = self.keychain.generate_op_signer();
-        burnchain_controller.submit_operation(key_reg_op, &mut op_signer);
+        burnchain_controller.submit_operation(key_reg_op, &mut op_signer, 1);
     }
 
     /// Process an state coming from the burnchain, by extracting the validated KeyRegisterOp
@@ -520,7 +521,7 @@ impl Node {
             );
 
             let mut op_signer = self.keychain.generate_op_signer();
-            burnchain_controller.submit_operation(op, &mut op_signer);
+            burnchain_controller.submit_operation(op, &mut op_signer, 1);
         }
     }
 
@@ -631,7 +632,7 @@ impl Node {
         };
 
         self.event_dispatcher
-            .process_chain_tip(&chain_tip, &parent_index_hash);
+            .process_chain_tip(&chain_tip, &parent_index_hash, Txid([0; 32]));
 
         self.chain_tip = Some(chain_tip.clone());
 
@@ -692,6 +693,8 @@ impl Node {
             ),
         };
 
+        let commit_outs = RewardSetInfo::into_commit_outs(None, false);
+
         BlockstackOperationType::LeaderBlockCommit(LeaderBlockCommitOp {
             block_header_hash,
             burn_fee,
@@ -704,7 +707,7 @@ impl Node {
             parent_vtxindex,
             vtxindex: 0,
             txid: Txid([0u8; 32]),
-            commit_outs: vec![],
+            commit_outs,
             block_height: 0,
             burn_header_hash: BurnchainHeaderHash([0u8; 32]),
         })
