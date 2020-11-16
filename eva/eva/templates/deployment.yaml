@@ -30,7 +30,7 @@ spec:
   storageClassName: azurefile
   resources:
     requests:
-      storage: 1Gi
+      storage: 30Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -55,7 +55,7 @@ spec:
         app: "eva-miner"
     spec:
       containers:
-      - image: ahgoo.azurecr.io/eva-auto:v0.0.9
+      - image: ahgoo.azurecr.io/eva-auto:v0.0.10
         imagePullPolicy: Always
         name: "eva-auto"
         args: ["eva-auto"]
