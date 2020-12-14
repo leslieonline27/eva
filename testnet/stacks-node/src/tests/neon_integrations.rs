@@ -2,19 +2,22 @@ use super::{
     make_contract_call, make_contract_publish, make_contract_publish_microblock_only,
     make_microblock, make_stacks_transfer_mblock_only, to_addr, ADDR_4, SK_1,
 };
-use stacks::burnchains::{Address, PoxConstants};
+use stacks::burnchains::{Address, Burnchain, PoxConstants};
 use stacks::chainstate::burn::ConsensusHash;
 use stacks::chainstate::stacks::{
     db::StacksChainState, StacksAddress, StacksBlock, StacksBlockHeader, StacksPrivateKey,
-    StacksPublicKey, StacksTransaction,
+    StacksPublicKey, StacksTransaction, TransactionPayload,
 };
 use stacks::core;
 use stacks::net::StacksMessageCodec;
+use stacks::util::hash::hex_bytes;
 use stacks::util::secp256k1::Secp256k1PublicKey;
 use stacks::vm::costs::ExecutionCost;
 use stacks::vm::execute;
 use stacks::vm::types::PrincipalData;
 use stacks::vm::Value;
+
+use stacks::vm::database::ClarityDeserializable;
 
 use super::bitcoin_regtest::BitcoinCoreController;
 use crate::{
@@ -265,6 +268,110 @@ fn bitcoind_integration_test() {
     eprintln!("Response: {:#?}", res);
     assert_eq!(u128::from_str_radix(&res.balance[2..], 16).unwrap(), 0);
     assert_eq!(res.nonce, 1);
+
+    channel.stop_chains_coordinator();
+}
+
+#[test]
+#[ignore]
+fn bitcoind_forking_test() {
+    if env::var("BITCOIND_TEST") != Ok("1".into()) {
+        return;
+    }
+
+    let (conf, miner_account) = neon_integration_test_conf();
+
+    let mut btcd_controller = BitcoinCoreController::new(conf.clone());
+    btcd_controller
+        .start_bitcoind()
+        .map_err(|_e| ())
+        .expect("Failed starting bitcoind");
+
+    let mut btc_regtest_controller = BitcoinRegtestController::new(conf.clone(), None);
+    let http_origin = format!("http://{}", &conf.node.rpc_bind);
+
+    btc_regtest_controller.bootstrap_chain(201);
+
+    eprintln!("Chain bootstrapped...");
+
+    let mut run_loop = neon::RunLoop::new(conf);
+    let blocks_processed = run_loop.get_blocks_processed_arc();
+    let client = reqwest::blocking::Client::new();
+
+    let channel = run_loop.get_coordinator_channel().unwrap();
+
+    thread::spawn(move || run_loop.start(0, None));
+
+    // give the run loop some time to start up!
+    wait_for_runloop(&blocks_processed);
+
+    // first block wakes up the run loop
+    next_block_and_wait(&mut btc_regtest_controller, &blocks_processed);
+
+    // first block will hold our VRF registration
+    next_block_and_wait(&mut btc_regtest_controller, &blocks_processed);
+
+    let mut sort_height = channel.get_sortitions_processed();
+    eprintln!("Sort height: {}", sort_height);
+
+    while sort_height < 210 {
+        next_block_and_wait(&mut btc_regtest_controller, &blocks_processed);
+        sort_height = channel.get_sortitions_processed();
+        eprintln!("Sort height: {}", sort_height);
+    }
+    // let's query the miner's account nonce:
+
+    eprintln!("Miner account: {}", miner_account);
+
+    let path = format!("{}/v2/accounts/{}?proof=0", &http_origin, &miner_account);
+    eprintln!("Test: GET {}", path);
+    let res = client
+        .get(&path)
+        .send()
+        .unwrap()
+        .json::<AccountEntryResponse>()
+        .unwrap();
+    eprintln!("Response: {:#?}", res);
+    assert_eq!(u128::from_str_radix(&res.balance[2..], 16).unwrap(), 0);
+    assert_eq!(res.nonce, 7);
+
+    // okay, let's figure out the burn block we want to fork away.
+    let burn_header_hash_to_fork = btc_regtest_controller.get_block_hash(206);
+    btc_regtest_controller.invalidate_block(&burn_header_hash_to_fork);
+    btc_regtest_controller.build_next_block(5);
+
+    thread::sleep(Duration::from_secs(5));
+    next_block_and_wait(&mut btc_regtest_controller, &blocks_processed);
+
+    eprintln!("Miner account: {}", miner_account);
+
+    let path = format!("{}/v2/accounts/{}?proof=0", &http_origin, &miner_account);
+    eprintln!("Test: GET {}", path);
+    let res = client
+        .get(&path)
+        .send()
+        .unwrap()
+        .json::<AccountEntryResponse>()
+        .unwrap();
+    eprintln!("Response: {:#?}", res);
+    assert_eq!(u128::from_str_radix(&res.balance[2..], 16).unwrap(), 0);
+    // the fork reduced our block height
+    assert_eq!(res.nonce, 2);
+
+    next_block_and_wait(&mut btc_regtest_controller, &blocks_processed);
+
+    let path = format!("{}/v2/accounts/{}?proof=0", &http_origin, &miner_account);
+    eprintln!("Test: GET {}", path);
+    let res = client
+        .get(&path)
+        .send()
+        .unwrap()
+        .json::<AccountEntryResponse>()
+        .unwrap();
+    eprintln!("Response: {:#?}", res);
+    assert_eq!(u128::from_str_radix(&res.balance[2..], 16).unwrap(), 0);
+    // but we're able to keep on mining
+    assert_eq!(res.nonce, 3);
 
     channel.stop_chains_coordinator();
 }
@@ -772,6 +879,13 @@ fn pox_integration_test() {
 
     let (mut conf, miner_account) = neon_integration_test_conf();
 
+    test_observer::spawn();
+
+    conf.events_observers.push(EventObserverConfig {
+        endpoint: format!("localhost:{}", test_observer::EVENT_OBSERVER_PORT),
+        events_keys: vec![EventKeyType::AnyEvent],
+    });
+
     let first_bal = 6_000_000_000 * (core::MICROSTACKS_PER_STACKS as u64);
     let second_bal = 2_000_000_000 * (core::MICROSTACKS_PER_STACKS as u64);
     let third_bal = 2_000_000_000 * (core::MICROSTACKS_PER_STACKS as u64);
@@ -798,12 +912,16 @@ fn pox_integration_test() {
         .map_err(|_e| ())
         .expect("Failed starting bitcoind");
 
-    let mut btc_regtest_controller = BitcoinRegtestController::new(conf.clone(), None);
-    let http_origin = format!("http://{}", &conf.node.rpc_bind);
-
-    let mut burnchain_config = btc_regtest_controller.get_burnchain();
-    let pox_constants = PoxConstants::new(10, 5, 4, 5, 15);
+    let mut burnchain_config = Burnchain::regtest(&conf.get_burn_db_path());
+    let pox_constants = PoxConstants::new(10, 5, 4, 5, 15, 239, 250);
     burnchain_config.pox_constants = pox_constants;
+
+    let mut btc_regtest_controller = BitcoinRegtestController::with_burnchain(
+        conf.clone(),
+        None,
+        Some(burnchain_config.clone()),
+    );
+    let http_origin = format!("http://{}", &conf.node.rpc_bind);
 
     btc_regtest_controller.bootstrap_chain(201);
 
@@ -876,7 +994,7 @@ fn pox_integration_test() {
             .unwrap()
             .unwrap(),
             Value::UInt(sort_height as u128),
-            Value::UInt(3),
+            Value::UInt(6),
         ],
     );
 
@@ -913,6 +1031,44 @@ fn pox_integration_test() {
         eprintln!("Sort height: {}", sort_height);
     }
 
+    let blocks_observed = test_observer::get_blocks();
+    assert!(
+        blocks_observed.len() >= 2,
+        "Blocks observed {} should be >= 2",
+        blocks_observed.len()
+    );
+
+    // look up the return value of our stacking operation...
+    let mut tested = false;
+    for block in blocks_observed.iter() {
+        if tested {
+            break;
+        }
+        let transactions = block.get("transactions").unwrap().as_array().unwrap();
+        eprintln!("{}", transactions.len());
+        for tx in transactions.iter() {
+            let raw_tx = tx.get("raw_tx").unwrap().as_str().unwrap();
+            if raw_tx == "0x00" {
+                continue;
+            }
+            let tx_bytes = hex_bytes(&raw_tx[2..]).unwrap();
+            let parsed = StacksTransaction::consensus_deserialize(&mut &tx_bytes[..]).unwrap();
+            if let TransactionPayload::ContractCall(_) = parsed.payload {
+            } else {
+                continue;
+            }
+
+            let raw_result = tx.get("raw_result").unwrap().as_str().unwrap();
+            let parsed = <Value as ClarityDeserializable<Value>>::deserialize(&raw_result[2..]);
+            assert_eq!(parsed.to_string(),
+                       format!("(ok (tuple (lock-amount u1000000000000000) (stacker {}) (unlock-burn-height u270)))",
+                               &spender_addr));
+            tested = true;
+        }
+    }
+
+    assert!(tested);
+
     // let's stack with spender 2 and spender 3...
 
     // now let's have sender_2 and sender_3 stack to pox addr 2 in
@@ -934,7 +1090,7 @@ fn pox_integration_test() {
             .unwrap()
             .unwrap(),
             Value::UInt(sort_height as u128),
-            Value::UInt(3),
+            Value::UInt(6),
         ],
     );
 
@@ -977,7 +1133,7 @@ fn pox_integration_test() {
             .unwrap()
             .unwrap(),
             Value::UInt(sort_height as u128),
-            Value::UInt(3),
+            Value::UInt(6),
         ],
     );
 
@@ -1022,6 +1178,7 @@ fn pox_integration_test() {
         "Should have received no outputs during PoX reward cycle"
     );
 
+    // before sunset
     // mine until the end of the next reward cycle,
     //   the participation threshold now should be met.
     while sort_height < 239 {
@@ -1030,7 +1187,7 @@ fn pox_integration_test() {
         eprintln!("Sort height: {}", sort_height);
     }
 
-    // we should have received _three_ Bitcoin commitments, because our commitment was 3 * threshold
+    // we should have received _seven_ Bitcoin commitments, because our commitment was 7 * threshold
     let utxos = btc_regtest_controller.get_all_utxos(&pox_pubkey);
 
     eprintln!("Got UTXOs: {}", utxos.len());
@@ -1052,7 +1209,73 @@ fn pox_integration_test() {
         "Should have received three outputs during PoX reward cycle"
     );
 
-    // okay, the threshold for participation should be
+    // get the canonical chain tip
+    let path = format!("{}/v2/info", &http_origin);
+    let tip_info = client
+        .get(&path)
+        .send()
+        .unwrap()
+        .json::<RPCPeerInfoData>()
+        .unwrap();
+
+    assert_eq!(tip_info.stacks_tip_height, 36);
+
+    // now let's mine into the sunset
+    while sort_height < 249 {
+        next_block_and_wait(&mut btc_regtest_controller, &blocks_processed);
+        sort_height = channel.get_sortitions_processed();
+        eprintln!("Sort height: {}", sort_height);
+    }
+
+    // get the canonical chain tip
+    let path = format!("{}/v2/info", &http_origin);
+    let tip_info = client
+        .get(&path)
+        .send()
+        .unwrap()
+        .json::<RPCPeerInfoData>()
+        .unwrap();
+
+    assert_eq!(tip_info.stacks_tip_height, 46);
+
+    let utxos = btc_regtest_controller.get_all_utxos(&pox_2_pubkey);
+
+    // should receive more rewards during this cycle...
+    eprintln!("Got UTXOs: {}", utxos.len());
+    assert_eq!(
+        utxos.len(),
+        14,
+        "Should have received more outputs during the sunsetting PoX reward cycle"
+    );
+
+    // and after sunset
+    while sort_height < 259 {
+        next_block_and_wait(&mut btc_regtest_controller, &blocks_processed);
+        sort_height = channel.get_sortitions_processed();
+        eprintln!("Sort height: {}", sort_height);
+    }
+
+    let utxos = btc_regtest_controller.get_all_utxos(&pox_2_pubkey);
+
+    // should *not* receive more rewards during the after sunset cycle...
+    eprintln!("Got UTXOs: {}", utxos.len());
+    assert_eq!(
+        utxos.len(),
+        14,
+        "Should have received no more outputs after sunset PoX reward cycle"
+    );
+
+    // should have progressed the chain, though!
+    // get the canonical chain tip
+    let path = format!("{}/v2/info", &http_origin);
+    let tip_info = client
+        .get(&path)
+        .send()
+        .unwrap()
+        .json::<RPCPeerInfoData>()
+        .unwrap();
+
+    assert_eq!(tip_info.stacks_tip_height, 56);
 
     channel.stop_chains_coordinator();
 }

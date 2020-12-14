@@ -25,8 +25,35 @@ use vm::types::{
 };
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum TransactionOrigin {
+    Stacks(StacksTransaction),
+    Burn(Txid),
+}
+
+impl From<StacksTransaction> for TransactionOrigin {
+    fn from(o: StacksTransaction) -> TransactionOrigin {
+        TransactionOrigin::Stacks(o)
+    }
+}
+
+impl TransactionOrigin {
+    pub fn txid(&self) -> Txid {
+        match self {
+            TransactionOrigin::Burn(txid) => txid.clone(),
+            TransactionOrigin::Stacks(tx) => tx.txid(),
+        }
+    }
+    pub fn serialize_to_vec(&self) -> Vec<u8> {
+        match self {
+            TransactionOrigin::Burn(txid) => txid.as_bytes().to_vec(),
+            TransactionOrigin::Stacks(tx) => tx.txid().as_bytes().to_vec(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct StacksTransactionReceipt {
-    pub transaction: StacksTransaction,
+    pub transaction: TransactionOrigin,
     pub events: Vec<StacksTransactionEvent>,
     pub post_condition_aborted: bool,
     pub result: Value,
