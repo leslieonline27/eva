@@ -89,6 +89,7 @@ features = ["std"]
 [dev-dependencies]
 assert-json-diff = "1.0.0"
 criterion = "0.3"
+stx_genesis = { package = "stx-genesis", path = "./stx-genesis/."}
 
 [features]
 default = ["developer-mode"]
@@ -97,11 +98,16 @@ monitoring_prom = ["prometheus"]
 tx_log = []
 slog_json = ["slog-json"]
 
+
+[profile.dev.package.regex]
+opt-level = 2
+
 [target.'cfg(all(target_arch = "x86_64", not(target_env = "msvc")))'.dependencies]
 sha2-asm = "0.5.3"
 
 [workspace]
 members = [
     ".", 
+    "stx-genesis",
     "testnet/stacks-node",
     "testnet/bitcoin-neon-controller"]

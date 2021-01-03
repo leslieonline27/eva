@@ -1,4 +1,4 @@
-// Copyright (C) 2013-2020 Blocstack PBC, a public benefit corporation
+// Copyright (C) 2013-2020 Blockstack PBC, a public benefit corporation
 // Copyright (C) 2020 Stacks Open Internet Foundation
 //
 // This program is free software: you can redistribute it and/or modify
@@ -37,14 +37,38 @@ pub const NETWORK_ID_TESTNET: u32 = 0xff000000;
 // default port
 pub const NETWORK_P2P_PORT: u16 = 6265;
 
+// sliding burnchain window over which a miner's past block-commit payouts will be used to weight
+// its current block-commit in a sortition
 pub const MINING_COMMITMENT_WINDOW: u8 = 6;
+
+/// The number of blocks which will share the block bonus
+///   from burn blocks that occurred without a sortition.
+///   (See: https://forum.stacks.org/t/pox-consensus-and-stx-future-supply)
+#[cfg(test)]
+pub const INITIAL_MINING_BONUS_WINDOW: u16 = 10;
+#[cfg(not(test))]
+pub const INITIAL_MINING_BONUS_WINDOW: u16 = 10_000;
 
 // first burnchain block hash
 // TODO: update once we know the true first burnchain block
 pub const FIRST_BURNCHAIN_CONSENSUS_HASH: ConsensusHash = ConsensusHash([0u8; 20]);
-pub const FIRST_BURNCHAIN_BLOCK_HASH: BurnchainHeaderHash = BurnchainHeaderHash([0u8; 32]);
-pub const FIRST_BURNCHAIN_BLOCK_HEIGHT: u32 = 0;
-pub const FIRST_BURNCHAIN_BLOCK_TIMESTAMP: u64 = 0;
+
+// TODO: TO BE SET BY STACKS_V1_MINER_THRESHOLD
+pub const BITCOIN_MAINNET_FIRST_BLOCK_HEIGHT: u64 = 661389;
+pub const BITCOIN_MAINNET_FIRST_BLOCK_TIMESTAMP: u32 = 1607986994;
+pub const BITCOIN_MAINNET_FIRST_BLOCK_HASH: &str =
+    "0000000000000000000351332d33cb67e4baa9bbe7808dc7c46517eb0b396e4b";
+pub const BITCOIN_MAINNET_INITIAL_REWARD_START_BLOCK: u64 = 651389;
+
+pub const BITCOIN_TESTNET_FIRST_BLOCK_HEIGHT: u64 = 1894315;
+pub const BITCOIN_TESTNET_FIRST_BLOCK_TIMESTAMP: u32 = 1606093490;
+pub const BITCOIN_TESTNET_FIRST_BLOCK_HASH: &str =
+    "000000000000003efa81a29f2ee638ca4d4928a073e68789bb06a4fc0b153653";
+
+pub const BITCOIN_REGTEST_FIRST_BLOCK_HEIGHT: u64 = 0;
+pub const BITCOIN_REGTEST_FIRST_BLOCK_TIMESTAMP: u32 = 0;
+pub const BITCOIN_REGTEST_FIRST_BLOCK_HASH: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
 
 pub const FIRST_STACKS_BLOCK_HASH: BlockHeaderHash = BlockHeaderHash([0u8; 32]);
 pub const EMPTY_MICROBLOCK_PARENT_HASH: BlockHeaderHash = BlockHeaderHash([0u8; 32]);
@@ -56,11 +80,11 @@ pub const CHAINSTATE_VERSION: &'static str = "23.0.0.0";
 
 pub const MICROSTACKS_PER_STACKS: u32 = 1_000_000;
 
-pub const POX_SUNSET_START: u64 = (FIRST_BURNCHAIN_BLOCK_HEIGHT as u64) + 100_000;
+pub const POX_SUNSET_START: u64 = 100_000;
 pub const POX_SUNSET_END: u64 = POX_SUNSET_START + 400_000;
 
-pub const POX_PREPARE_WINDOW_LENGTH: u32 = 240;
-pub const POX_REWARD_CYCLE_LENGTH: u32 = 2000;
+pub const POX_PREPARE_WINDOW_LENGTH: u32 = 100;
+pub const POX_REWARD_CYCLE_LENGTH: u32 = 2100;
 /// The maximum amount that PoX rewards can be scaled by.
 ///  That is, if participation is very low, rewards are:
 ///      POX_MAXIMAL_SCALING x (rewards with 100% participation)

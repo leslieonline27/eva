@@ -1,4 +1,4 @@
-// Copyright (C) 2013-2020 Blocstack PBC, a public benefit corporation
+// Copyright (C) 2013-2020 Blockstack PBC, a public benefit corporation
 // Copyright (C) 2020 Stacks Open Internet Foundation
 //
 // This program is free software: you can redistribute it and/or modify
@@ -1811,6 +1811,13 @@ impl ConversationP2P {
                         break;
                     }
                 }
+                Err(net_error::PermanentlyDrained) => {
+                    trace!(
+                        "{:?}: failed to recv on P2P conversation: PermanentlyDrained",
+                        self
+                    );
+                    return Err(net_error::PermanentlyDrained);
+                }
                 Err(e) => {
                     info!("{:?}: failed to recv on P2P conversation: {:?}", self, &e);
                     return Err(e);
@@ -2494,7 +2501,15 @@ mod test {
             let mut tx = SortitionHandleTx::begin(sortdb, &prev_snapshot.sortition_id).unwrap();
 
             let next_index_root = tx
-                .append_chain_tip_snapshot(&prev_snapshot, &next_snapshot, &vec![], None, None)
+                .append_chain_tip_snapshot(
+                    &prev_snapshot,
+                    &next_snapshot,
+                    &vec![],
+                    &vec![],
+                    None,
+                    None,
+                    None,
+                )
                 .unwrap();
             next_snapshot.index_root = next_index_root;
 
@@ -2526,6 +2541,7 @@ mod test {
             consensus_hash_lifetime: 24,
             stable_confirmations: 7,
             first_block_height: 12300,
+            initial_reward_start_block: 12300,
             first_block_hash: first_burn_hash.clone(),
             first_block_timestamp: 0,
             pox_constants: PoxConstants::test_default(),

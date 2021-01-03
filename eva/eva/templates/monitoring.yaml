@@ -12,6 +12,9 @@ spec:
   - name: metrics
     port: 12800
     protocol: TCP
+  - name: eva-metrics
+    port: 12779
+    protocol: TCP
   selector:
     proposition: eva
 ---
@@ -29,6 +32,8 @@ metadata:
 spec:
     endpoints:
     - port: metrics
+      interval: 5s
+    - port: eva-metrics
       interval: 5s
     namespaceSelector:
         matchNames:

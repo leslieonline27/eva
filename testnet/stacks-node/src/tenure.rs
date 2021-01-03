@@ -1,4 +1,4 @@
-use super::node::{ChainTip, TESTNET_CHAIN_ID};
+use super::node::ChainTip;
 use super::{BurnchainTip, Config};
 
 use std::thread;
@@ -77,8 +77,8 @@ impl<'a> Tenure {
         }
 
         let (mut chain_state, _) = StacksChainState::open_with_block_limit(
-            false,
-            TESTNET_CHAIN_ID,
+            self.config.is_mainnet(),
+            self.config.burnchain.chain_id,
             &self.config.get_chainstate_path(),
             self.config.block_limit.clone(),
         )
@@ -106,5 +106,19 @@ impl<'a> Tenure {
             burn_fee: self.burn_fee_cap,
         };
         Some(artifact)
+    }
+
+    #[cfg(test)]
+    pub fn open_chainstate(&self) -> StacksChainState {
+        use super::config::TESTNET_CHAIN_ID;
+
+        let (chain_state, _) = StacksChainState::open_with_block_limit(
+            false,
+            TESTNET_CHAIN_ID,
+            &self.config.get_chainstate_path(),
+            self.config.block_limit.clone(),
+        )
+        .unwrap();
+        chain_state
     }
 }

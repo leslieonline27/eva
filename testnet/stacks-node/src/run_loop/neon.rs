@@ -1,5 +1,7 @@
 use crate::{
-    neon_node, BitcoinRegtestController, BurnchainController, Config, EventDispatcher, Keychain,
+    genesis_data::USE_TEST_GENESIS_CHAINSTATE,
+    node::{get_account_balances, get_account_lockups, get_names, get_namespaces},
+    BitcoinRegtestController, BurnchainController, Config, EventDispatcher, Keychain,
     NeonGenesisNode,
 };
 use stacks::burnchains::bitcoin::address::BitcoinAddress;
@@ -12,8 +14,10 @@ use stacks::chainstate::coordinator::{
 };
 use stacks::chainstate::stacks::boot::STACKS_BOOT_CODE_CONTRACT_ADDRESS_STR;
 use stacks::chainstate::stacks::db::{ChainStateBootData, ClarityTx, StacksChainState};
+use stacks::net::atlas::AtlasConfig;
 use stacks::vm::types::{PrincipalData, QualifiedContractIdentifier, Value};
 use std::cmp;
+use std::sync::mpsc::sync_channel;
 use std::thread;
 
 use super::RunLoopCallbacks;
@@ -104,11 +108,14 @@ impl RunLoop {
 
         let is_miner = if self.config.node.miner {
             let keychain = Keychain::default(self.config.node.seed.clone());
+            let node_address = Keychain::address_from_burnchain_signer(
+                &keychain.get_burnchain_signer(),
+                self.config.is_mainnet(),
+            );
             let btc_addr = BitcoinAddress::from_bytes(
                 self.config.burnchain.get_bitcoin_network().1,
                 BitcoinAddressType::PublicKeyHash,
-                &Keychain::address_from_burnchain_signer(&keychain.get_burnchain_signer())
-                    .to_bytes(),
+                &node_address.to_bytes(),
             )
             .unwrap();
             info!("Miner node: checking UTXOs at address: {}", btc_addr);
@@ -137,8 +144,8 @@ impl RunLoop {
             }
         };
 
-        let mainnet = false;
-        let chainid = neon_node::TESTNET_CHAIN_ID;
+        let mainnet = self.config.is_mainnet();
+        let chainid = self.config.burnchain.chain_id;
         let block_limit = self.config.block_limit.clone();
         let initial_balances = self
             .config
@@ -158,6 +165,7 @@ impl RunLoop {
         let chainstate_path = self.config.get_chainstate_path();
         let coordinator_burnchain_config = burnchain_config.clone();
 
+        let (attachments_tx, attachments_rx) = sync_channel(1);
         let first_block_height = burnchain_config.first_block_height as u128;
         let pox_prepare_length = burnchain_config.pox_constants.prepare_length as u128;
         let pox_reward_cycle_length = burnchain_config.pox_constants.reward_cycle_length as u128;
@@ -188,11 +196,23 @@ impl RunLoop {
                 .expect("Failed to set burnchain parameters in PoX contract");
             });
         });
-        let mut boot_data = ChainStateBootData::new(
-            &coordinator_burnchain_config,
+        let mut boot_data = ChainStateBootData {
             initial_balances,
-            Some(boot_block),
-        );
+            post_flight_callback: Some(boot_block),
+            first_burnchain_block_hash: coordinator_burnchain_config.first_block_hash,
+            first_burnchain_block_height: coordinator_burnchain_config.first_block_height as u32,
+            first_burnchain_block_timestamp: coordinator_burnchain_config.first_block_timestamp,
+            get_bulk_initial_lockups: Some(Box::new(|| {
+                get_account_lockups(USE_TEST_GENESIS_CHAINSTATE)
+            })),
+            get_bulk_initial_balances: Some(Box::new(|| {
+                get_account_balances(USE_TEST_GENESIS_CHAINSTATE)
+            })),
+            get_bulk_initial_namespaces: Some(Box::new(|| {
+                get_namespaces(USE_TEST_GENESIS_CHAINSTATE)
+            })),
+            get_bulk_initial_names: Some(Box::new(|| get_names(USE_TEST_GENESIS_CHAINSTATE))),
+        };
 
         let (chain_state_db, receipts) = StacksChainState::open_and_exec(
             mainnet,
@@ -204,12 +224,17 @@ impl RunLoop {
         .unwrap();
         coordinator_dispatcher.dispatch_boot_receipts(receipts);
 
+        let atlas_config = AtlasConfig::default();
+        let moved_atlas_config = atlas_config.clone();
+
         thread::spawn(move || {
             ChainsCoordinator::run(
                 chain_state_db,
                 coordinator_burnchain_config,
+                attachments_tx,
                 &mut coordinator_dispatcher,
                 coordinator_receivers,
+                moved_atlas_config,
             );
         });
 
@@ -239,6 +264,8 @@ impl RunLoop {
                 self.get_blocks_processed_arc(),
                 coordinator_senders,
                 pox_watchdog.make_comms_handle(),
+                attachments_rx,
+                atlas_config,
             )
         } else {
             node.into_initialized_node(
@@ -246,6 +273,8 @@ impl RunLoop {
                 self.get_blocks_processed_arc(),
                 coordinator_senders,
                 pox_watchdog.make_comms_handle(),
+                attachments_rx,
+                atlas_config,
             )
         };
 

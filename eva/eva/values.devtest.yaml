@@ -3,4 +3,4 @@ global:
 
 stacksNode:
     image: ahgoo.azurecr.io/stacks-node
-    version: v23.0.0.10-krypton
+    version: v24.0.0.0-xenon

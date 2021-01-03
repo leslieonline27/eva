@@ -7,8 +7,8 @@ use vm::errors::{
     RuntimeErrorType,
 };
 use vm::types::{
-    OptionalData, PrincipalData, QualifiedContractIdentifier, StandardPrincipalData,
-    TupleTypeSignature, TypeSignature, Value, NONE,
+    OptionalData, PrincipalData, QualifiedContractIdentifier, ResponseData, StandardPrincipalData,
+    TupleData, TupleTypeSignature, TypeSignature, Value, NONE,
 };
 
 use std::convert::TryInto;
@@ -32,15 +32,21 @@ use util::hash::to_hex;
 use vm::eval;
 use vm::tests::{execute, is_committed, is_err_code, symbols_from_values};
 
+use address::AddressHashMode;
 use core::{
-    FIRST_BURNCHAIN_BLOCK_HASH, FIRST_BURNCHAIN_BLOCK_HEIGHT, FIRST_BURNCHAIN_BLOCK_TIMESTAMP,
-    FIRST_BURNCHAIN_CONSENSUS_HASH, FIRST_STACKS_BLOCK_HASH, POX_REWARD_CYCLE_LENGTH,
+    BITCOIN_REGTEST_FIRST_BLOCK_HASH, BITCOIN_REGTEST_FIRST_BLOCK_HEIGHT,
+    BITCOIN_REGTEST_FIRST_BLOCK_TIMESTAMP, FIRST_BURNCHAIN_CONSENSUS_HASH, FIRST_STACKS_BLOCK_HASH,
+    POX_REWARD_CYCLE_LENGTH,
 };
+use vm::types::Value::Response;
 
 const BOOT_CODE_POX_BODY: &'static str = std::include_str!("pox.clar");
 const BOOT_CODE_POX_TESTNET_CONSTS: &'static str = std::include_str!("pox-testnet.clar");
 const BOOT_CODE_POX_MAINNET_CONSTS: &'static str = std::include_str!("pox-mainnet.clar");
 const BOOT_CODE_LOCKUP: &'static str = std::include_str!("lockup.clar");
+
+const BOOT_CODE_COSTS: &'static str = std::include_str!("costs.clar");
+const BOOT_CODE_COST_VOTING: &'static str = std::include_str!("cost-voting.clar");
 
 const USTX_PER_HOLDER: u128 = 1_000_000;
 
@@ -57,6 +63,12 @@ lazy_static! {
         &format!("{}.pox", STACKS_BOOT_CODE_CONTRACT_ADDRESS_STR)
     )
     .unwrap();
+    static ref COST_VOTING_CONTRACT: QualifiedContractIdentifier =
+        QualifiedContractIdentifier::parse(&format!(
+            "{}.cost-voting",
+            STACKS_BOOT_CODE_CONTRACT_ADDRESS_STR
+        ))
+        .unwrap();
     static ref USER_KEYS: Vec<StacksPrivateKey> =
         (0..50).map(|_| StacksPrivateKey::new()).collect();
     static ref POX_ADDRS: Vec<Value> = (0..50u64)
@@ -65,6 +77,14 @@ lazy_static! {
             &to_hex(&ix.to_le_bytes())
         )))
         .collect();
+    static ref MINER_KEY: StacksPrivateKey = StacksPrivateKey::new();
+    static ref MINER_ADDR: StacksAddress = StacksAddress::from_public_keys(
+        C32_ADDRESS_VERSION_TESTNET_SINGLESIG,
+        &AddressHashMode::SerializeP2PKH,
+        1,
+        &vec![StacksPublicKey::from_private(&MINER_KEY.clone())],
+    )
+    .unwrap();
     static ref LIQUID_SUPPLY: u128 = USTX_PER_HOLDER * (POX_ADDRS.len() as u128);
     static ref MIN_THRESHOLD: u128 = *LIQUID_SUPPLY / 480;
 }
@@ -91,6 +111,7 @@ impl From<&StacksPrivateKey> for Value {
 struct ClarityTestSim {
     marf: MarfedKV,
     height: u64,
+    fork: u64,
 }
 
 struct TestSimHeadersDB {
@@ -100,16 +121,18 @@ struct TestSimHeadersDB {
 impl ClarityTestSim {
     pub fn new() -> ClarityTestSim {
         let mut marf = MarfedKV::temporary();
-        marf.begin(
-            &StacksBlockId::sentinel(),
-            &StacksBlockId(test_sim_height_to_hash(0)),
-        );
         {
-            marf.as_clarity_db(&NULL_HEADER_DB, &NULL_BURN_STATE_DB)
+            let mut store = marf.begin(
+                &StacksBlockId::sentinel(),
+                &StacksBlockId(test_sim_height_to_hash(0, 0)),
+            );
+
+            store
+                .as_clarity_db(&NULL_HEADER_DB, &NULL_BURN_STATE_DB)
                 .initialize();
 
             let mut owned_env =
-                OwnedEnvironment::new(marf.as_clarity_db(&NULL_HEADER_DB, &NULL_BURN_STATE_DB));
+                OwnedEnvironment::new(store.as_clarity_db(&NULL_HEADER_DB, &NULL_BURN_STATE_DB));
 
             for user_key in USER_KEYS.iter() {
                 owned_env.stx_faucet(
@@ -117,19 +140,23 @@ impl ClarityTestSim {
                     USTX_PER_HOLDER,
                 );
             }
+            store.test_commit();
         }
-        marf.test_commit();
 
-        ClarityTestSim { marf, height: 0 }
+        ClarityTestSim {
+            marf,
+            height: 0,
+            fork: 0,
+        }
     }
 
     pub fn execute_next_block<F, R>(&mut self, f: F) -> R
     where
         F: FnOnce(&mut OwnedEnvironment) -> R,
     {
-        self.marf.begin(
-            &StacksBlockId(test_sim_height_to_hash(self.height)),
-            &StacksBlockId(test_sim_height_to_hash(self.height + 1)),
+        let mut store = self.marf.begin(
+            &StacksBlockId(test_sim_height_to_hash(self.height, self.fork)),
+            &StacksBlockId(test_sim_height_to_hash(self.height + 1, self.fork)),
         );
 
         let r = {
@@ -137,20 +164,46 @@ impl ClarityTestSim {
                 height: self.height + 1,
             };
             let mut owned_env =
-                OwnedEnvironment::new(self.marf.as_clarity_db(&headers_db, &NULL_BURN_STATE_DB));
+                OwnedEnvironment::new(store.as_clarity_db(&headers_db, &NULL_BURN_STATE_DB));
             f(&mut owned_env)
         };
 
-        self.marf.test_commit();
+        store.test_commit();
         self.height += 1;
+
+        r
+    }
+
+    pub fn execute_block_as_fork<F, R>(&mut self, parent_height: u64, f: F) -> R
+    where
+        F: FnOnce(&mut OwnedEnvironment) -> R,
+    {
+        let mut store = self.marf.begin(
+            &StacksBlockId(test_sim_height_to_hash(parent_height, self.fork)),
+            &StacksBlockId(test_sim_height_to_hash(parent_height + 1, self.fork + 1)),
+        );
+
+        let r = {
+            let headers_db = TestSimHeadersDB {
+                height: parent_height + 1,
+            };
+            let mut owned_env =
+                OwnedEnvironment::new(store.as_clarity_db(&headers_db, &NULL_BURN_STATE_DB));
+            f(&mut owned_env)
+        };
+
+        store.test_commit();
+        self.height = parent_height + 1;
+        self.fork += 1;
 
         r
     }
 }
 
-fn test_sim_height_to_hash(burn_height: u64) -> [u8; 32] {
+fn test_sim_height_to_hash(burn_height: u64, fork: u64) -> [u8; 32] {
     let mut out = [0; 32];
     out[0..8].copy_from_slice(&burn_height.to_le_bytes());
+    out[8..16].copy_from_slice(&fork.to_le_bytes());
     out
 }
 
@@ -170,7 +223,7 @@ impl HeadersDB for TestSimHeadersDB {
         id_bhh: &StacksBlockId,
     ) -> Option<BurnchainHeaderHash> {
         if *id_bhh == *FIRST_INDEX_BLOCK_HASH {
-            Some(FIRST_BURNCHAIN_BLOCK_HASH)
+            Some(BurnchainHeaderHash::from_hex(BITCOIN_REGTEST_FIRST_BLOCK_HASH).unwrap())
         } else {
             self.get_burn_block_height_for_block(id_bhh)?;
             Some(BurnchainHeaderHash(id_bhh.0.clone()))
@@ -195,18 +248,18 @@ impl HeadersDB for TestSimHeadersDB {
 
     fn get_burn_block_time_for_block(&self, id_bhh: &StacksBlockId) -> Option<u64> {
         if *id_bhh == *FIRST_INDEX_BLOCK_HASH {
-            Some(FIRST_BURNCHAIN_BLOCK_TIMESTAMP)
+            Some(BITCOIN_REGTEST_FIRST_BLOCK_TIMESTAMP as u64)
         } else {
             let burn_block_height = self.get_burn_block_height_for_block(id_bhh)? as u64;
             Some(
-                FIRST_BURNCHAIN_BLOCK_TIMESTAMP + burn_block_height
-                    - FIRST_BURNCHAIN_BLOCK_HEIGHT as u64,
+                BITCOIN_REGTEST_FIRST_BLOCK_TIMESTAMP as u64 + burn_block_height
+                    - BITCOIN_REGTEST_FIRST_BLOCK_HEIGHT as u64,
             )
         }
     }
     fn get_burn_block_height_for_block(&self, id_bhh: &StacksBlockId) -> Option<u32> {
         if *id_bhh == *FIRST_INDEX_BLOCK_HASH {
-            Some(FIRST_BURNCHAIN_BLOCK_HEIGHT)
+            Some(BITCOIN_REGTEST_FIRST_BLOCK_HEIGHT as u32)
         } else {
             let input_height = test_sim_hash_to_height(&id_bhh.0)?;
             if input_height > self.height {
@@ -214,7 +267,7 @@ impl HeadersDB for TestSimHeadersDB {
                 None
             } else {
                 Some(
-                    (FIRST_BURNCHAIN_BLOCK_HEIGHT as u64 + input_height)
+                    (BITCOIN_REGTEST_FIRST_BLOCK_HEIGHT as u32 + input_height as u32)
                         .try_into()
                         .unwrap(),
                 )
@@ -222,7 +275,7 @@ impl HeadersDB for TestSimHeadersDB {
         }
     }
     fn get_miner_address(&self, _id_bhh: &StacksBlockId) -> Option<StacksAddress> {
-        None
+        Some(MINER_ADDR.clone())
     }
     fn get_total_liquid_ustx(&self, _id_bhh: &StacksBlockId) -> u128 {
         *LIQUID_SUPPLY
@@ -472,7 +525,7 @@ fn delegation_tests() {
                 "(ok {{ stacker: '{}, lock-amount: {}, unlock-burn-height: {} }})",
                 Value::from(&USER_KEYS[0]),
                 Value::UInt(*MIN_THRESHOLD - 1),
-                Value::UInt(360)
+                Value::UInt(450)
             ))
         );
 
@@ -580,7 +633,7 @@ fn delegation_tests() {
                 "(ok {{ stacker: '{}, lock-amount: {}, unlock-burn-height: {} }})",
                 Value::from(&USER_KEYS[2]),
                 Value::UInt(*MIN_THRESHOLD - 1),
-                Value::UInt(240)
+                Value::UInt(300)
             ))
         );
 
@@ -684,7 +737,7 @@ fn delegation_tests() {
                 "(ok {{ stacker: '{}, lock-amount: {}, unlock-burn-height: {} }})",
                 Value::from(&USER_KEYS[3]),
                 Value::UInt(*MIN_THRESHOLD),
-                Value::UInt(360)
+                Value::UInt(450)
             ))
         );
 
@@ -795,7 +848,7 @@ fn delegation_tests() {
                 "(ok {{ stacker: '{}, lock-amount: {}, unlock-burn-height: {} }})",
                 Value::from(&USER_KEYS[1]),
                 Value::UInt(*MIN_THRESHOLD),
-                Value::UInt(360)
+                Value::UInt(450)
             ))
         );
 
@@ -843,6 +896,629 @@ fn delegation_tests() {
             .0
             .to_string(),
             "(err 9)".to_string()
+        );
+    });
+}
+
+#[test]
+fn test_vote_withdrawal() {
+    let mut sim = ClarityTestSim::new();
+
+    sim.execute_next_block(|env| {
+        env.initialize_contract(COST_VOTING_CONTRACT.clone(), &BOOT_CODE_COST_VOTING)
+            .unwrap();
+
+        // Submit a proposal
+        assert_eq!(
+            env.execute_transaction(
+                (&USER_KEYS[0]).into(),
+                COST_VOTING_CONTRACT.clone(),
+                "submit-proposal",
+                &symbols_from_values(vec![
+                    Value::Principal(
+                        PrincipalData::parse_qualified_contract_principal(
+                            "ST000000000000000000002AMW42H.function-name"
+                        )
+                        .unwrap()
+                    ),
+                    Value::string_ascii_from_bytes("function-name".into()).unwrap(),
+                    Value::Principal(
+                        PrincipalData::parse_qualified_contract_principal(
+                            "ST000000000000000000002AMW42H.cost-function-name"
+                        )
+                        .unwrap()
+                    ),
+                    Value::string_ascii_from_bytes("cost-function-name".into()).unwrap(),
+                ])
+            )
+            .unwrap()
+            .0,
+            Value::Response(ResponseData {
+                committed: true,
+                data: Value::UInt(0).into()
+            })
+        );
+
+        // Vote on the proposal
+        env.execute_transaction(
+            (&USER_KEYS[0]).into(),
+            COST_VOTING_CONTRACT.clone(),
+            "vote-proposal",
+            &symbols_from_values(vec![Value::UInt(0), Value::UInt(10)]),
+        )
+        .unwrap()
+        .0;
+
+        // Assert that the number of votes is correct
+        assert_eq!(
+            env.execute_transaction(
+                (&USER_KEYS[0]).into(),
+                COST_VOTING_CONTRACT.clone(),
+                "get-proposal-votes",
+                &symbols_from_values(vec![Value::UInt(0)])
+            )
+            .unwrap()
+            .0,
+            Value::Optional(OptionalData {
+                data: Some(Box::from(Value::UInt(10)))
+            })
+        );
+
+        // Vote again on the proposal
+        env.execute_transaction(
+            (&USER_KEYS[0]).into(),
+            COST_VOTING_CONTRACT.clone(),
+            "vote-proposal",
+            &symbols_from_values(vec![Value::UInt(0), Value::UInt(5)]),
+        )
+        .unwrap()
+        .0;
+
+        // Assert that the number of votes is correct
+        assert_eq!(
+            env.execute_transaction(
+                (&USER_KEYS[0]).into(),
+                COST_VOTING_CONTRACT.clone(),
+                "get-proposal-votes",
+                &symbols_from_values(vec![Value::UInt(0)])
+            )
+            .unwrap()
+            .0,
+            Value::Optional(OptionalData {
+                data: Some(Box::from(Value::UInt(15)))
+            })
+        );
+
+        // Assert votes are assigned to principal
+        assert_eq!(
+            env.execute_transaction(
+                (&USER_KEYS[0]).into(),
+                COST_VOTING_CONTRACT.clone(),
+                "get-principal-votes",
+                &symbols_from_values(vec![
+                    Value::Principal(StandardPrincipalData::from(&USER_KEYS[0]).into()),
+                    Value::UInt(0),
+                ])
+            )
+            .unwrap()
+            .0,
+            Value::Optional(OptionalData {
+                data: Some(Box::from(Value::UInt(15)))
+            })
+        );
+
+        // Assert withdrawal fails if amount is more than voted
+        assert_eq!(
+            env.execute_transaction(
+                (&USER_KEYS[0]).into(),
+                COST_VOTING_CONTRACT.clone(),
+                "withdraw-votes",
+                &symbols_from_values(vec![Value::UInt(0), Value::UInt(20)]),
+            )
+            .unwrap()
+            .0,
+            Value::Response(ResponseData {
+                committed: false,
+                data: Value::Int(5).into()
+            })
+        );
+
+        // Withdraw votes
+        env.execute_transaction(
+            (&USER_KEYS[0]).into(),
+            COST_VOTING_CONTRACT.clone(),
+            "withdraw-votes",
+            &symbols_from_values(vec![Value::UInt(0), Value::UInt(5)]),
+        )
+        .unwrap();
+
+        // Assert withdrawal worked
+        assert_eq!(
+            env.execute_transaction(
+                (&USER_KEYS[0]).into(),
+                COST_VOTING_CONTRACT.clone(),
+                "get-proposal-votes",
+                &symbols_from_values(vec![Value::UInt(0)])
+            )
+            .unwrap()
+            .0,
+            Value::Optional(OptionalData {
+                data: Some(Box::from(Value::UInt(10)))
+            })
+        );
+    });
+
+    // Fast forward to proposal expiration
+    for _ in 0..2016 {
+        sim.execute_next_block(|_| {});
+    }
+
+    sim.execute_next_block(|env| {
+        // Withdraw STX after proposal expires
+        env.execute_transaction(
+            (&USER_KEYS[0]).into(),
+            COST_VOTING_CONTRACT.clone(),
+            "withdraw-votes",
+            &symbols_from_values(vec![Value::UInt(0), Value::UInt(10)]),
+        )
+        .unwrap();
+    });
+
+    sim.execute_next_block(|env| {
+        // Assert that stx balance is correct
+        assert_eq!(
+            env.eval_read_only(
+                &COST_VOTING_CONTRACT,
+                &format!("(stx-get-balance '{})", &Value::from(&USER_KEYS[0]))
+            )
+            .unwrap()
+            .0,
+            Value::UInt(1000000)
+        );
+    });
+}
+
+#[test]
+fn test_vote_fail() {
+    let mut sim = ClarityTestSim::new();
+
+    // Test voting in a proposal
+    sim.execute_next_block(|env| {
+        env.initialize_contract(COST_VOTING_CONTRACT.clone(), &BOOT_CODE_COST_VOTING)
+            .unwrap();
+
+        // Submit a proposal
+        assert_eq!(
+            env.execute_transaction(
+                (&USER_KEYS[0]).into(),
+                COST_VOTING_CONTRACT.clone(),
+                "submit-proposal",
+                &symbols_from_values(vec![
+                    Value::Principal(
+                        PrincipalData::parse_qualified_contract_principal(
+                            "ST000000000000000000002AMW42H.function-name2"
+                        )
+                        .unwrap()
+                    ),
+                    Value::string_ascii_from_bytes("function-name2".into()).unwrap(),
+                    Value::Principal(
+                        PrincipalData::parse_qualified_contract_principal(
+                            "ST000000000000000000002AMW42H.cost-function-name2"
+                        )
+                        .unwrap()
+                    ),
+                    Value::string_ascii_from_bytes("cost-function-name2".into()).unwrap(),
+                ])
+            )
+            .unwrap()
+            .0,
+            Value::Response(ResponseData {
+                committed: true,
+                data: Value::UInt(0).into()
+            })
+        );
+
+        // Assert confirmation fails
+        assert_eq!(
+            env.execute_transaction(
+                (&USER_KEYS[0]).into(),
+                COST_VOTING_CONTRACT.clone(),
+                "confirm-votes",
+                &symbols_from_values(vec![Value::UInt(0)])
+            )
+            .unwrap()
+            .0,
+            Value::Response(ResponseData {
+                committed: false,
+                data: Value::Int(11).into()
+            })
+        );
+
+        // Assert voting with more STX than are in an account fails
+        assert_eq!(
+            env.execute_transaction(
+                (&USER_KEYS[0]).into(),
+                COST_VOTING_CONTRACT.clone(),
+                "vote-proposal",
+                &symbols_from_values(vec![Value::UInt(0), Value::UInt(USTX_PER_HOLDER + 1)]),
+            )
+            .unwrap()
+            .0,
+            Value::Response(ResponseData {
+                committed: false,
+                data: Value::Int(5).into()
+            })
+        );
+
+        // Commit all liquid stacks to vote
+        for user in USER_KEYS.iter() {
+            env.execute_transaction(
+                user.into(),
+                COST_VOTING_CONTRACT.clone(),
+                "vote-proposal",
+                &symbols_from_values(vec![Value::UInt(0), Value::UInt(USTX_PER_HOLDER)]),
+            )
+            .unwrap()
+            .0;
+        }
+
+        // Assert confirmation returns true
+        assert_eq!(
+            env.execute_transaction(
+                (&USER_KEYS[0]).into(),
+                COST_VOTING_CONTRACT.clone(),
+                "confirm-votes",
+                &symbols_from_values(vec![Value::UInt(0)])
+            )
+            .unwrap()
+            .0,
+            Value::Response(ResponseData {
+                committed: true,
+                data: Value::Bool(true).into()
+            })
+        );
+    });
+
+    sim.execute_next_block(|env| {
+        env.execute_transaction(
+            (&MINER_KEY.clone()).into(),
+            COST_VOTING_CONTRACT.clone(),
+            "veto",
+            &symbols_from_values(vec![Value::UInt(0)]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            env.execute_transaction(
+                (&USER_KEYS[0]).into(),
+                COST_VOTING_CONTRACT.clone(),
+                "get-proposal-vetos",
+                &symbols_from_values(vec![Value::UInt(0)])
+            )
+            .unwrap()
+            .0,
+            Value::Optional(OptionalData {
+                data: Some(Box::from(Value::UInt(1)))
+            })
+        );
+    });
+
+    let fork_start = sim.height;
+
+    for _ in 0..1000 {
+        sim.execute_next_block(|env| {
+            env.execute_transaction(
+                (&MINER_KEY.clone()).into(),
+                COST_VOTING_CONTRACT.clone(),
+                "veto",
+                &symbols_from_values(vec![Value::UInt(0)]),
+            )
+            .unwrap();
+
+            // assert error if already vetoed in this block
+            assert_eq!(
+                env.execute_transaction(
+                    (&MINER_KEY.clone()).into(),
+                    COST_VOTING_CONTRACT.clone(),
+                    "veto",
+                    &symbols_from_values(vec![Value::UInt(0)])
+                )
+                .unwrap()
+                .0,
+                Value::Response(ResponseData {
+                    committed: false,
+                    data: Value::Int(9).into()
+                })
+            );
+        })
+    }
+
+    for _ in 0..100 {
+        sim.execute_next_block(|_| {});
+    }
+
+    sim.execute_next_block(|env| {
+        // Assert confirmation fails because of majority veto
+        assert_eq!(
+            env.execute_transaction(
+                (&USER_KEYS[0]).into(),
+                COST_VOTING_CONTRACT.clone(),
+                "confirm-miners",
+                &symbols_from_values(vec![Value::UInt(0)])
+            )
+            .unwrap()
+            .0,
+            Value::Response(ResponseData {
+                committed: false,
+                data: Value::Int(14).into()
+            })
+        );
+    });
+
+    // let's fork, and overcome the veto
+    sim.execute_block_as_fork(fork_start, |_| {});
+    for _ in 0..1100 {
+        sim.execute_next_block(|_| {});
+    }
+
+    sim.execute_next_block(|env| {
+        // Assert confirmation passes because there are no vetos
+        assert_eq!(
+            env.execute_transaction(
+                (&USER_KEYS[0]).into(),
+                COST_VOTING_CONTRACT.clone(),
+                "confirm-miners",
+                &symbols_from_values(vec![Value::UInt(0)])
+            )
+            .unwrap()
+            .0,
+            Value::Response(ResponseData {
+                committed: true,
+                data: Value::Bool(true).into(),
+            })
+        );
+    });
+}
+
+#[test]
+fn test_vote_confirm() {
+    let mut sim = ClarityTestSim::new();
+
+    sim.execute_next_block(|env| {
+        env.initialize_contract(COST_VOTING_CONTRACT.clone(), &BOOT_CODE_COST_VOTING)
+            .unwrap();
+
+        // Submit a proposal
+        assert_eq!(
+            env.execute_transaction(
+                (&USER_KEYS[0]).into(),
+                COST_VOTING_CONTRACT.clone(),
+                "submit-proposal",
+                &symbols_from_values(vec![
+                    Value::Principal(
+                        PrincipalData::parse_qualified_contract_principal(
+                            "ST000000000000000000002AMW42H.function-name2"
+                        )
+                        .unwrap()
+                    ),
+                    Value::string_ascii_from_bytes("function-name2".into()).unwrap(),
+                    Value::Principal(
+                        PrincipalData::parse_qualified_contract_principal(
+                            "ST000000000000000000002AMW42H.cost-function-name2"
+                        )
+                        .unwrap()
+                    ),
+                    Value::string_ascii_from_bytes("cost-function-name2".into()).unwrap(),
+                ])
+            )
+            .unwrap()
+            .0,
+            Value::Response(ResponseData {
+                committed: true,
+                data: Value::UInt(0).into()
+            })
+        );
+
+        // Assert confirmation fails
+        assert_eq!(
+            env.execute_transaction(
+                (&USER_KEYS[0]).into(),
+                COST_VOTING_CONTRACT.clone(),
+                "confirm-votes",
+                &symbols_from_values(vec![Value::UInt(0)])
+            )
+            .unwrap()
+            .0,
+            Value::Response(ResponseData {
+                committed: false,
+                data: Value::Int(11).into()
+            })
+        );
+
+        // Commit all liquid stacks to vote
+        for user in USER_KEYS.iter() {
+            env.execute_transaction(
+                user.into(),
+                COST_VOTING_CONTRACT.clone(),
+                "vote-proposal",
+                &symbols_from_values(vec![Value::UInt(0), Value::UInt(USTX_PER_HOLDER)]),
+            )
+            .unwrap()
+            .0;
+        }
+
+        // Assert confirmation returns true
+        assert_eq!(
+            env.execute_transaction(
+                (&USER_KEYS[0]).into(),
+                COST_VOTING_CONTRACT.clone(),
+                "confirm-votes",
+                &symbols_from_values(vec![Value::UInt(0)])
+            )
+            .unwrap()
+            .0,
+            Value::Response(ResponseData {
+                committed: true,
+                data: Value::Bool(true).into()
+            })
+        );
+    });
+
+    // Fast forward to proposal expiration
+    for _ in 0..2016 {
+        sim.execute_next_block(|_| {});
+    }
+
+    for _ in 0..1007 {
+        sim.execute_next_block(|_| {});
+    }
+
+    sim.execute_next_block(|env| {
+        // Assert confirmation passes
+        assert_eq!(
+            env.execute_transaction(
+                (&USER_KEYS[0]).into(),
+                COST_VOTING_CONTRACT.clone(),
+                "confirm-miners",
+                &symbols_from_values(vec![Value::UInt(0)])
+            )
+            .unwrap()
+            .0,
+            Value::Response(ResponseData {
+                committed: true,
+                data: Value::Bool(true).into()
+            })
+        );
+    });
+}
+
+#[test]
+fn test_vote_too_many_confirms() {
+    let mut sim = ClarityTestSim::new();
+
+    let MAX_CONFIRMATIONS_PER_BLOCK = 10;
+    sim.execute_next_block(|env| {
+        env.initialize_contract(COST_VOTING_CONTRACT.clone(), &BOOT_CODE_COST_VOTING)
+            .unwrap();
+
+        // Submit a proposal
+        for i in 0..(MAX_CONFIRMATIONS_PER_BLOCK + 1) {
+            assert_eq!(
+                env.execute_transaction(
+                    (&USER_KEYS[0]).into(),
+                    COST_VOTING_CONTRACT.clone(),
+                    "submit-proposal",
+                    &symbols_from_values(vec![
+                        Value::Principal(
+                            PrincipalData::parse_qualified_contract_principal(
+                                "ST000000000000000000002AMW42H.function-name2"
+                            )
+                            .unwrap()
+                        ),
+                        Value::string_ascii_from_bytes("function-name2".into()).unwrap(),
+                        Value::Principal(
+                            PrincipalData::parse_qualified_contract_principal(
+                                "ST000000000000000000002AMW42H.cost-function-name2"
+                            )
+                            .unwrap()
+                        ),
+                        Value::string_ascii_from_bytes("cost-function-name2".into()).unwrap(),
+                    ])
+                )
+                .unwrap()
+                .0,
+                Value::Response(ResponseData {
+                    committed: true,
+                    data: Value::UInt(i as u128).into()
+                })
+            );
+        }
+
+        for i in 0..(MAX_CONFIRMATIONS_PER_BLOCK + 1) {
+            // Commit all liquid stacks to vote
+            for user in USER_KEYS.iter() {
+                assert_eq!(
+                    env.execute_transaction(
+                        user.into(),
+                        COST_VOTING_CONTRACT.clone(),
+                        "vote-proposal",
+                        &symbols_from_values(vec![
+                            Value::UInt(i as u128),
+                            Value::UInt(USTX_PER_HOLDER)
+                        ]),
+                    )
+                    .unwrap()
+                    .0,
+                    Value::okay_true()
+                );
+            }
+
+            // Assert confirmation returns true
+            assert_eq!(
+                env.execute_transaction(
+                    (&USER_KEYS[0]).into(),
+                    COST_VOTING_CONTRACT.clone(),
+                    "confirm-votes",
+                    &symbols_from_values(vec![Value::UInt(i as u128)])
+                )
+                .unwrap()
+                .0,
+                Value::okay_true(),
+            );
+
+            // withdraw
+            for user in USER_KEYS.iter() {
+                env.execute_transaction(
+                    user.into(),
+                    COST_VOTING_CONTRACT.clone(),
+                    "withdraw-votes",
+                    &symbols_from_values(vec![
+                        Value::UInt(i as u128),
+                        Value::UInt(USTX_PER_HOLDER),
+                    ]),
+                )
+                .unwrap()
+                .0;
+            }
+        }
+    });
+
+    // Fast forward to proposal expiration
+    for _ in 0..2016 {
+        sim.execute_next_block(|_| {});
+    }
+
+    for _ in 0..1007 {
+        sim.execute_next_block(|_| {});
+    }
+
+    sim.execute_next_block(|env| {
+        for i in 0..MAX_CONFIRMATIONS_PER_BLOCK {
+            // Assert confirmation passes
+            assert_eq!(
+                env.execute_transaction(
+                    (&USER_KEYS[0]).into(),
+                    COST_VOTING_CONTRACT.clone(),
+                    "confirm-miners",
+                    &symbols_from_values(vec![Value::UInt(i as u128)])
+                )
+                .unwrap()
+                .0,
+                Value::okay_true(),
+            );
+        }
+
+        // Assert next confirmation fails
+        assert_eq!(
+            env.execute_transaction(
+                (&USER_KEYS[0]).into(),
+                COST_VOTING_CONTRACT.clone(),
+                "confirm-miners",
+                &symbols_from_values(vec![Value::UInt(MAX_CONFIRMATIONS_PER_BLOCK)])
+            )
+            .unwrap()
+            .0,
+            Value::error(Value::Int(17)).unwrap()
         );
     });
 }

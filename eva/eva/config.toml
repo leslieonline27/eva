@@ -14,7 +14,7 @@ public_ip_address = "40.76.173.26:20444"
 [burnchain]
 chain = "bitcoin"
 mode = "krypton"
-peer_host = "bitcoind.blockstack.org"
+peer_host = "bitcoind.krypton.blockstack.org"
 rpc_port = 18443
 peer_port = 18444
 burn_fee_cap = 20000

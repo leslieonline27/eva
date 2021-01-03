@@ -1,6 +1,5 @@
 use std::convert::TryInto;
-use std::fs::File;
-use std::io::{BufReader, Read};
+use std::fs;
 use std::net::{SocketAddr, ToSocketAddrs};
 
 use rand::RngCore;
@@ -15,8 +14,11 @@ use stacks::util::secp256k1::Secp256k1PublicKey;
 use stacks::vm::costs::ExecutionCost;
 use stacks::vm::types::{AssetIdentifier, PrincipalData, QualifiedContractIdentifier};
 
-use super::neon_node::TESTNET_PEER_VERSION;
-use super::node::TESTNET_CHAIN_ID;
+pub const TESTNET_CHAIN_ID: u32 = 0x80000000;
+pub const TESTNET_PEER_VERSION: u32 = 0xfacade01;
+
+pub const MAINNET_CHAIN_ID: u32 = 0x00000001;
+pub const MAINNET_PEER_VERSION: u32 = 0x18000000;
 
 const MINIMUM_DUST_FEE: u64 = 5500;
 
@@ -24,23 +26,83 @@ const MINIMUM_DUST_FEE: u64 = 5500;
 pub struct ConfigFile {
     pub burnchain: Option<BurnchainConfigFile>,
     pub node: Option<NodeConfigFile>,
-    pub mstx_balance: Option<Vec<InitialBalanceFile>>,
+    pub ustx_balance: Option<Vec<InitialBalanceFile>>,
     pub events_observer: Option<Vec<EventObserverConfigFile>>,
     pub connection_options: Option<ConnectionOptionsFile>,
     pub block_limit: Option<BlockLimitFile>,
 }
 
+#[derive(Clone, Deserialize, Default)]
+pub struct LegacyMstxConfigFile {
+    pub mstx_balance: Option<Vec<InitialBalanceFile>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn should_load_legacy_mstx_balances_toml() {
+        let config = ConfigFile::from_str(
+            r#"
+            [[ustx_balance]]
+            address = "STB44HYPYAT2BB2QE513NSP81HTMYWBJP02HPGK6"
+            amount = 10000000000000000
+
+            [[ustx_balance]]
+            address = "ST11NJTTKGVT6D1HY4NJRVQWMQM7TVAR091EJ8P2Y"
+            amount = 10000000000000000
+
+            [[mstx_balance]] # legacy property name
+            address = "ST1HB1T8WRNBYB0Y3T7WXZS38NKKPTBR3EG9EPJKR"
+            amount = 10000000000000000
+
+            [[mstx_balance]] # legacy property name
+            address = "STRYYQQ9M8KAF4NS7WNZQYY59X93XEKR31JP64CP"
+            amount = 10000000000000000
+            "#,
+        );
+        assert!(config.ustx_balance.is_some());
+        let balances = config
+            .ustx_balance
+            .expect("Failed to parse stx balances from toml");
+        assert_eq!(balances.len(), 4);
+        assert_eq!(
+            balances[0].address,
+            "STB44HYPYAT2BB2QE513NSP81HTMYWBJP02HPGK6"
+        );
+        assert_eq!(
+            balances[1].address,
+            "ST11NJTTKGVT6D1HY4NJRVQWMQM7TVAR091EJ8P2Y"
+        );
+        assert_eq!(
+            balances[2].address,
+            "ST1HB1T8WRNBYB0Y3T7WXZS38NKKPTBR3EG9EPJKR"
+        );
+        assert_eq!(
+            balances[3].address,
+            "STRYYQQ9M8KAF4NS7WNZQYY59X93XEKR31JP64CP"
+        );
+    }
+}
+
 impl ConfigFile {
     pub fn from_path(path: &str) -> ConfigFile {
-        let path = File::open(path).unwrap();
-        let mut config_file_reader = BufReader::new(path);
-        let mut config_file = vec![];
-        config_file_reader.read_to_end(&mut config_file).unwrap();
-        toml::from_slice(&config_file[..]).unwrap()
+        let content_str = fs::read_to_string(path).unwrap();
+        Self::from_str(&content_str)
     }
 
     pub fn from_str(content: &str) -> ConfigFile {
-        toml::from_slice(&content.as_bytes()).unwrap()
+        let mut config: ConfigFile = toml::from_str(content).unwrap();
+        let legacy_config: LegacyMstxConfigFile = toml::from_str(content).unwrap();
+        if let Some(mstx_balance) = legacy_config.mstx_balance {
+            warn!("'mstx_balance' inside toml config is deprecated, replace with 'ustx_balance'");
+            config.ustx_balance = match config.ustx_balance {
+                Some(balance) => Some([balance, mstx_balance].concat()),
+                None => Some(mstx_balance),
+            };
+        }
+        config
     }
 
     pub fn neon() -> ConfigFile {
@@ -80,7 +142,7 @@ impl ConfigFile {
         ConfigFile {
             burnchain: Some(burnchain),
             node: Some(node),
-            mstx_balance: Some(balances),
+            ustx_balance: Some(balances),
             ..ConfigFile::default()
         }
     }
@@ -123,7 +185,7 @@ impl ConfigFile {
         ConfigFile {
             burnchain: Some(burnchain),
             node: Some(node),
-            mstx_balance: Some(balances),
+            ustx_balance: Some(balances),
             ..ConfigFile::default()
         }
     }
@@ -166,7 +228,7 @@ impl ConfigFile {
         ConfigFile {
             burnchain: Some(burnchain),
             node: Some(node),
-            mstx_balance: Some(balances),
+            ustx_balance: Some(balances),
             ..ConfigFile::default()
         }
     }
@@ -177,6 +239,7 @@ impl ConfigFile {
             rpc_port: Some(18332),
             peer_port: Some(18333),
             peer_host: Some("bitcoind.xenon.blockstack.org".to_string()),
+            magic_bytes: Some("X3".into()),
             ..BurnchainConfigFile::default()
         };
 
@@ -208,7 +271,30 @@ impl ConfigFile {
         ConfigFile {
             burnchain: Some(burnchain),
             node: Some(node),
-            mstx_balance: Some(balances),
+            ustx_balance: Some(balances),
+            ..ConfigFile::default()
+        }
+    }
+
+    pub fn mainnet() -> ConfigFile {
+        let burnchain = BurnchainConfigFile {
+            mode: Some("mainnet".to_string()),
+            rpc_port: Some(8332),
+            peer_port: Some(8333),
+            peer_host: Some("bitcoind.blockstack.org".to_string()),
+            ..BurnchainConfigFile::default()
+        };
+
+        let node = NodeConfigFile {
+            bootstrap_node: Some("047435c194e9b01b3d7f7a2802d6684a3af68d05bbf4ec8f17021980d777691f1d51651f7f1d566532c804da506c117bbf79ad62eea81213ba58f8808b4d9504ad@mainnet.blockstack.org:20444".to_string()),
+            miner: Some(false),
+            ..NodeConfigFile::default()
+        };
+
+        ConfigFile {
+            burnchain: Some(burnchain),
+            node: Some(node),
+            ustx_balance: None,
             ..ConfigFile::default()
         }
     }
@@ -301,6 +387,7 @@ lazy_static! {
         download_interval: 10,
         dns_timeout: 15_000,
         max_inflight_blocks: 6,
+        max_inflight_attachments: 6,
         .. std::default::Default::default()
     };
 }
@@ -314,17 +401,12 @@ pub const HELIUM_BLOCK_LIMIT: ExecutionCost = ExecutionCost {
 };
 
 impl Config {
-    pub fn from_config_file_path(path: &str) -> Config {
-        let config_file = ConfigFile::from_path(path);
-        Config::from_config_file(config_file)
-    }
-
     pub fn from_config_file(config_file: ConfigFile) -> Config {
         let default_node_config = NodeConfig::default();
-        let node = match config_file.node {
+        let (mut node, bootstrap_node, deny_nodes) = match config_file.node {
             Some(node) => {
                 let rpc_bind = node.rpc_bind.unwrap_or(default_node_config.rpc_bind);
-                let mut node_config = NodeConfig {
+                let node_config = NodeConfig {
                     name: node.name.unwrap_or(default_node_config.name),
                     seed: match node.seed {
                         Some(seed) => {
@@ -352,6 +434,12 @@ impl Config {
                     mine_microblocks: node
                         .mine_microblocks
                         .unwrap_or(default_node_config.mine_microblocks),
+                    microblock_frequency: node
+                        .microblock_frequency
+                        .unwrap_or(default_node_config.microblock_frequency),
+                    max_microblocks: node
+                        .max_microblocks
+                        .unwrap_or(default_node_config.max_microblocks),
                     wait_time_for_microblocks: node
                         .wait_time_for_microblocks
                         .unwrap_or(default_node_config.wait_time_for_microblocks),
@@ -359,22 +447,37 @@ impl Config {
                     pox_sync_sample_secs: node
                         .pox_sync_sample_secs
                         .unwrap_or(default_node_config.pox_sync_sample_secs),
+                    use_test_genesis_chainstate: node.use_test_genesis_chainstate,
                 };
-                node_config.set_bootstrap_node(node.bootstrap_node);
-                if let Some(deny_nodes) = node.deny_nodes {
-                    node_config.set_deny_nodes(deny_nodes);
-                }
-                node_config
+                (node_config, node.bootstrap_node, node.deny_nodes)
             }
-            None => default_node_config,
+            None => (default_node_config, None, None),
         };
 
         let default_burnchain_config = BurnchainConfig::default();
+
         let burnchain = match config_file.burnchain {
-            Some(burnchain) => {
+            Some(mut burnchain) => {
+                if burnchain.mode.as_deref() == Some("xenon") {
+                    if burnchain.magic_bytes.is_none() {
+                        burnchain.magic_bytes = ConfigFile::xenon().burnchain.unwrap().magic_bytes;
+                    }
+                }
+                let burnchain_mode = burnchain.mode.unwrap_or(default_burnchain_config.mode);
+
                 BurnchainConfig {
                     chain: burnchain.chain.unwrap_or(default_burnchain_config.chain),
-                    mode: burnchain.mode.unwrap_or(default_burnchain_config.mode),
+                    chain_id: if &burnchain_mode == "mainnet" {
+                        MAINNET_CHAIN_ID
+                    } else {
+                        TESTNET_CHAIN_ID
+                    },
+                    peer_version: if &burnchain_mode == "mainnet" {
+                        MAINNET_PEER_VERSION
+                    } else {
+                        TESTNET_PEER_VERSION
+                    },
+                    mode: burnchain_mode.clone(),
                     burn_fee_cap: burnchain
                         .burn_fee_cap
                         .unwrap_or(default_burnchain_config.burn_fee_cap),
@@ -410,7 +513,14 @@ impl Config {
                     spv_headers_path: burnchain
                         .spv_headers_path
                         .unwrap_or(node.get_default_spv_headers_path()),
-                    magic_bytes: default_burnchain_config.magic_bytes,
+                    magic_bytes: burnchain
+                        .magic_bytes
+                        .map(|magic_ascii| {
+                            assert_eq!(magic_ascii.len(), 2, "Magic bytes must be length-2");
+                            assert!(magic_ascii.is_ascii(), "Magic bytes must be ASCII");
+                            MagicBytes::from(magic_ascii.as_bytes())
+                        })
+                        .unwrap_or(default_burnchain_config.magic_bytes),
                     local_mining_public_key: burnchain.local_mining_public_key,
                     burnchain_op_tx_fee: burnchain
                         .burnchain_op_tx_fee
@@ -424,7 +534,9 @@ impl Config {
             None => default_burnchain_config,
         };
 
-        let supported_modes = vec!["mocknet", "helium", "neon", "argon", "krypton", "xenon"];
+        let supported_modes = vec![
+            "mocknet", "helium", "neon", "argon", "krypton", "xenon", "mainnet",
+        ];
 
         if !supported_modes.contains(&burnchain.mode.as_str()) {
             panic!(
@@ -437,7 +549,12 @@ impl Config {
             panic!("Config is missing the setting `burnchain.local_mining_public_key` (mandatory for helium)")
         }
 
-        let initial_balances: Vec<InitialBalance> = match config_file.mstx_balance {
+        node.set_bootstrap_node(bootstrap_node, burnchain.chain_id, burnchain.peer_version);
+        if let Some(deny_nodes) = deny_nodes {
+            node.set_deny_nodes(deny_nodes, burnchain.chain_id, burnchain.peer_version);
+        }
+
+        let initial_balances: Vec<InitialBalance> = match config_file.ustx_balance {
             Some(balances) => balances
                 .iter()
                 .map(|balance| {
@@ -589,6 +706,11 @@ impl Config {
                             .max_inflight_blocks
                             .clone()
                     }),
+                    max_inflight_attachments: opts.max_inflight_attachments.unwrap_or_else(|| {
+                        HELIUM_DEFAULT_CONNECTION_OPTIONS
+                            .max_inflight_attachments
+                            .clone()
+                    }),
                     maximum_call_argument_size: opts.maximum_call_argument_size.unwrap_or_else(
                         || {
                             HELIUM_DEFAULT_CONNECTION_OPTIONS
@@ -670,6 +792,10 @@ impl Config {
         format!("{}/peer_db.sqlite", self.node.working_dir)
     }
 
+    pub fn get_atlas_db_path(&self) -> String {
+        format!("{}/chainstate/atlas_db.sqlite", self.node.working_dir)
+    }
+
     pub fn add_initial_balance(&mut self, address: String, amount: u64) {
         let new_balance = InitialBalance {
             address: PrincipalData::parse_standard_principal(&address)
@@ -686,6 +812,13 @@ impl Config {
             total += ib.amount as u128
         }
         total
+    }
+
+    pub fn is_mainnet(&self) -> bool {
+        match self.burnchain.mode.as_str() {
+            "mainnet" => true,
+            _ => false,
+        }
     }
 }
 
@@ -720,6 +853,8 @@ impl std::default::Default for Config {
 pub struct BurnchainConfig {
     pub chain: String,
     pub mode: String,
+    pub chain_id: u32,
+    pub peer_version: u32,
     pub commit_anchor_block_within: u64,
     pub burn_fee_cap: u64,
     pub peer_host: String,
@@ -742,6 +877,8 @@ impl BurnchainConfig {
         BurnchainConfig {
             chain: "bitcoin".to_string(),
             mode: "mocknet".to_string(),
+            chain_id: TESTNET_CHAIN_ID,
+            peer_version: TESTNET_PEER_VERSION,
             burn_fee_cap: 20000,
             commit_anchor_block_within: 5000,
             peer_host: "0.0.0.0".to_string(),
@@ -823,9 +960,12 @@ pub struct NodeConfig {
     pub deny_nodes: Vec<Neighbor>,
     pub miner: bool,
     pub mine_microblocks: bool,
+    pub microblock_frequency: u64,
+    pub max_microblocks: u64,
     pub wait_time_for_microblocks: u64,
     pub prometheus_bind: Option<String>,
     pub pox_sync_sample_secs: u64,
+    pub use_test_genesis_chainstate: Option<bool>,
 }
 
 impl NodeConfig {
@@ -833,6 +973,7 @@ impl NodeConfig {
         let mut rng = rand::thread_rng();
         let mut buf = [0u8; 8];
         rng.fill_bytes(&mut buf);
+
         let testnet_id = format!("stacks-testnet-{}", to_hex(&buf));
 
         let rpc_port = 20443;
@@ -858,9 +999,12 @@ impl NodeConfig {
             local_peer_seed: local_peer_seed.to_vec(),
             miner: false,
             mine_microblocks: false,
+            microblock_frequency: 5000,
+            max_microblocks: u16::MAX as u64,
             wait_time_for_microblocks: 5000,
             prometheus_bind: None,
             pox_sync_sample_secs: 30,
+            use_test_genesis_chainstate: None,
         }
     }
 
@@ -872,11 +1016,16 @@ impl NodeConfig {
         format!("{}/spv-headers.dat", self.get_burnchain_path())
     }
 
-    fn default_neighbor(addr: SocketAddr, pubk: Secp256k1PublicKey) -> Neighbor {
+    fn default_neighbor(
+        addr: SocketAddr,
+        pubk: Secp256k1PublicKey,
+        chain_id: u32,
+        peer_version: u32,
+    ) -> Neighbor {
         Neighbor {
             addr: NeighborKey {
-                peer_version: TESTNET_PEER_VERSION,
-                network_id: TESTNET_CHAIN_ID,
+                peer_version: peer_version,
+                network_id: chain_id,
                 addrbytes: PeerAddress::from_socketaddr(&addr),
                 port: addr.port(),
             },
@@ -892,7 +1041,12 @@ impl NodeConfig {
         }
     }
 
-    pub fn set_bootstrap_node(&mut self, bootstrap_node: Option<String>) {
+    pub fn set_bootstrap_node(
+        &mut self,
+        bootstrap_node: Option<String>,
+        chain_id: u32,
+        peer_version: u32,
+    ) {
         if let Some(bootstrap_node) = bootstrap_node {
             let comps: Vec<&str> = bootstrap_node.split("@").collect();
             match comps[..] {
@@ -902,7 +1056,8 @@ impl NodeConfig {
 
                     let mut addrs_iter = peer_addr.to_socket_addrs().unwrap();
                     let sock_addr = addrs_iter.next().unwrap();
-                    let neighbor = NodeConfig::default_neighbor(sock_addr, pubk);
+                    let neighbor =
+                        NodeConfig::default_neighbor(sock_addr, pubk, chain_id, peer_version);
                     self.bootstrap_node = Some(neighbor);
                 }
                 _ => {}
@@ -910,20 +1065,22 @@ impl NodeConfig {
         }
     }
 
-    pub fn add_deny_node(&mut self, deny_node: &str) {
+    pub fn add_deny_node(&mut self, deny_node: &str, chain_id: u32, peer_version: u32) {
         let sockaddr = deny_node.to_socket_addrs().unwrap().next().unwrap();
         let neighbor = NodeConfig::default_neighbor(
             sockaddr,
             Secp256k1PublicKey::from_private(&Secp256k1PrivateKey::new()),
+            chain_id,
+            peer_version,
         );
         self.deny_nodes.push(neighbor);
     }
 
-    pub fn set_deny_nodes(&mut self, deny_nodes: String) {
+    pub fn set_deny_nodes(&mut self, deny_nodes: String, chain_id: u32, peer_version: u32) {
         let parts: Vec<&str> = deny_nodes.split(",").collect();
         for part in parts.into_iter() {
             if part.len() > 0 {
-                self.add_deny_node(&part);
+                self.add_deny_node(&part, chain_id, peer_version);
             }
         }
     }
@@ -949,6 +1106,7 @@ pub struct ConnectionOptionsFile {
     pub walk_interval: Option<u64>,
     pub dns_timeout: Option<u128>,
     pub max_inflight_blocks: Option<u64>,
+    pub max_inflight_attachments: Option<u64>,
     pub read_only_call_limit_write_length: Option<u64>,
     pub read_only_call_limit_read_length: Option<u64>,
     pub read_only_call_limit_write_count: Option<u64>,
@@ -986,9 +1144,12 @@ pub struct NodeConfigFile {
     pub local_peer_seed: Option<String>,
     pub miner: Option<bool>,
     pub mine_microblocks: Option<bool>,
+    pub microblock_frequency: Option<u64>,
+    pub max_microblocks: Option<u64>,
     pub wait_time_for_microblocks: Option<u64>,
     pub prometheus_bind: Option<String>,
     pub pox_sync_sample_secs: Option<u64>,
+    pub use_test_genesis_chainstate: Option<bool>,
 }
 
 #[derive(Clone, Deserialize, Default)]
@@ -1068,7 +1229,7 @@ impl EventKeyType {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct InitialBalance {
     pub address: PrincipalData,
     pub amount: u64,

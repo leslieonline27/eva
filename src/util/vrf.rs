@@ -1,4 +1,4 @@
-// Copyright (C) 2013-2020 Blocstack PBC, a public benefit corporation
+// Copyright (C) 2013-2020 Blockstack PBC, a public benefit corporation
 // Copyright (C) 2020 Stacks Open Internet Foundation
 //
 // This program is free software: you can redistribute it and/or modify
@@ -207,7 +207,7 @@ impl VRFPublicKey {
         }
     }
 
-    pub fn from_hex(h: &String) -> Option<VRFPublicKey> {
+    pub fn from_hex(h: &str) -> Option<VRFPublicKey> {
         match hex_bytes(h) {
             Ok(b) => VRF::check_public_key(&b),
             Err(_) => None,

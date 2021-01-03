@@ -18,4 +18,4 @@ FROM alpine
 
 COPY --from=build /out/ /bin/
 
-CMD ["stacks-node", "argon"]
+CMD ["stacks-node", "krypton"]
