@@ -1,6 +1,0 @@
-global:
-    environment: devtest
-
-stacksNode:
-    image: ahgoo.azurecr.io/stacks-node
-    version: v24.0.0.0-xenon

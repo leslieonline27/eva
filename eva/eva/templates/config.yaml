@@ -1,6 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: stacks-config
-data:
-{{ (.Files.Glob "config.toml").AsConfig | indent 4  }}
